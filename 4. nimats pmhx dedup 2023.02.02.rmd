@@ -1,0 +1,1182 @@
+---
+title: "MuM_PreDiCT: Deduplicate NIMATS previous medical history"
+output: html_notebook
+---
+
+
+last updated: 2023.02.08 (Lisa Kent)
+
+This notebook:
+* reads in raw NIMATS previous medical history table from database
+* explores and de-duplicates each variable (all pregnancy level variables)
+* builds a pregnancy level dataset
+* final dataset written to csv
+
+
+
+```{r}
+if(!require(tidyverse)) install.packages("tidyverse")
+library(tidyverse)
+```
+
+__Lode odbc (Open Database Connectivity) package__
+```{r}
+library(odbc)
+```
+
+__Declare connection to database__
+```{r}
+con <- dbConnect(odbc::odbc(), "hirusql3", timeout = 10)
+```
+
+
+
+__NIMATS PREVIOUS MEDICAL HISTORY__
+```{r}
+nimats_pmh <- dbGetQuery(con,"Select * from [HDRNIHBS_E062].[Prev_Medical_History_1]")
+```
+
+
+```{r}
+head(nimats_pmh, 50)
+```
+
+
+__TRIM WHITE SPACE__
+```{r}
+nimats_pmh <- nimats_pmh %>%
+  mutate(across(everything(), str_trim))
+```
+
+__FIX NA VALUES__
+```{r}
+nimats_pmh[nimats_pmh =="<NA>"] <- NA
+```
+
+__COERCE DATES TO CORRECT FORMAT__
+```{r}
+nimats_pmh <- nimats_pmh %>%
+  mutate(DOB_MONTH = case_when(
+    DOB_MONTH == "JANUARY" ~ "01",
+    DOB_MONTH == "FEBRUARY" ~ "02",
+    DOB_MONTH == "MARCH" ~ "03",
+    DOB_MONTH == "APRIL" ~ "04",
+    DOB_MONTH == "MAY" ~ "05",
+    DOB_MONTH == "JUNE" ~ "06",
+    DOB_MONTH == "JULY" ~ "07",
+    DOB_MONTH == "AUGUST" ~ "08",
+    DOB_MONTH == "SEPTEMBER" ~ "09",
+    DOB_MONTH == "OCTOBER" ~ "10",
+    DOB_MONTH == "NOVEMBER" ~ "11",
+    DOB_MONTH == "DECEMBER" ~ "12",
+    
+  ))
+```
+
+
+__CREATE PREGNANCY LEVEL IDENTIFIER__
+```{r}
+nimats_pmh <- nimats_pmh %>%
+  unite(PREG_ID,
+        c("STUDY_ID", "DOB_YEAR", "DOB_MONTH"),
+        remove = F,
+        sep="_")
+
+head(nimats_pmh)
+  
+```
+
+
+
+__DEDUPLICATION OF PREG LEVEL DATA__
+```{r}
+# variables selected one by one to check if any causing duplicates
+nimats_pmh_preg_level <- nimats_pmh %>%
+  select(PREG_ID, DOB_MONTH, DOB_YEAR) %>%
+  distinct()
+
+
+```
+
+```{r}
+# sanity check (should all be same number)
+n_distinct(nimats_pmh$STUDY_ID, nimats_pmh$DOB_MONTH, nimats_pmh$DOB_YEAR)
+n_distinct(nimats_pmh$PREG_ID)
+nrow(nimats_pmh_preg_level)
+```
+
+```{r}
+colnames(nimats_pmh)
+```
+
+
+__BLOOD DISORDERS__
+```{r}
+nimats_pmh_preg_level_blood <- nimats_pmh %>%
+  select(PREG_ID, BLOOD_DISORDERS_CODE, BLOOD_DISORDERS_DESC) %>%
+  distinct()
+# additional rows added
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_pmh_preg_level_blood$PREG_ID))
+duplicates <- nimats_pmh_preg_level_blood[nimats_pmh_preg_level_blood$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_pmh_preg_level_blood %>% group_by(BLOOD_DISORDERS_CODE, BLOOD_DISORDERS_DESC) %>% count()
+# 09 and 9 reading in as "9" just use desc
+```
+
+```{r}
+nimats_pmh_preg_level_blood$BLOOD_DISORDERS_DESC <- gsub(" ", "_", nimats_pmh_preg_level_blood$BLOOD_DISORDERS_DESC)
+ 
+nimats_pmh_preg_level_blood %>% group_by(BLOOD_DISORDERS_DESC) %>% count()
+```
+
+
+```{r}
+nimats_pmh_preg_level_blood_summary <- nimats_pmh_preg_level_blood %>%
+  select(PREG_ID, BLOOD_DISORDERS_DESC) %>%
+  group_by(PREG_ID, BLOOD_DISORDERS_DESC) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_pmh_preg_level_blood_summary$COUNT[nimats_pmh_preg_level_blood_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_pmh_preg_level_blood_wide <- nimats_pmh_preg_level_blood_summary %>%
+  pivot_wider(names_from = BLOOD_DISORDERS_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_pmh_preg_level_blood_wide)[2:ncol(nimats_pmh_preg_level_blood_wide)] <- paste0("PMH_BLOOD_DISORDER_", colnames(nimats_pmh_preg_level_blood_wide)[2:ncol(nimats_pmh_preg_level_blood_wide)])
+head(nimats_pmh_preg_level_blood_wide)
+```
+
+
+```{r}
+nimats_pmh_preg_level <- left_join(nimats_pmh_preg_level, nimats_pmh_preg_level_blood_wide, by="PREG_ID")
+```
+
+
+
+
+__CARDIOVASCULAR__
+```{r}
+nimats_pmh_preg_level_cv <- nimats_pmh %>%
+  select(PREG_ID, CARDIOVASCULAR_CODE, CARDIOVASCULAR_DESC) %>%
+  distinct()
+# additional rows added
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_pmh_preg_level_cv$PREG_ID))
+duplicates <- nimats_pmh_preg_level_cv[nimats_pmh_preg_level_cv$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_pmh_preg_level_cv %>% group_by(CARDIOVASCULAR_CODE, CARDIOVASCULAR_DESC) %>% count()
+# just use desc
+```
+
+```{r}
+nimats_pmh_preg_level_cv$CARDIOVASCULAR_DESC <- gsub(" ", "_", nimats_pmh_preg_level_cv$CARDIOVASCULAR_DESC)
+ 
+nimats_pmh_preg_level_cv %>% group_by(CARDIOVASCULAR_DESC) %>% count()
+```
+
+
+```{r}
+nimats_pmh_preg_level_cv_summary <- nimats_pmh_preg_level_cv %>%
+  select(PREG_ID, CARDIOVASCULAR_DESC) %>%
+  group_by(PREG_ID, CARDIOVASCULAR_DESC) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_pmh_preg_level_cv_summary$COUNT[nimats_pmh_preg_level_cv_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_pmh_preg_level_cv_wide <- nimats_pmh_preg_level_cv_summary %>%
+  pivot_wider(names_from = CARDIOVASCULAR_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_pmh_preg_level_cv_wide)[2:ncol(nimats_pmh_preg_level_cv_wide)] <- paste0("PMH_CARDIOVASCULAR_", colnames(nimats_pmh_preg_level_cv_wide)[2:ncol(nimats_pmh_preg_level_cv_wide)])
+head(nimats_pmh_preg_level_cv_wide)
+```
+
+
+```{r}
+nimats_pmh_preg_level <- left_join(nimats_pmh_preg_level, nimats_pmh_preg_level_cv_wide, by="PREG_ID")
+```
+
+
+__CNS__
+```{r}
+nimats_pmh_preg_level_cns <- nimats_pmh %>%
+  select(PREG_ID, CNS_CODE, CNS_DESC) %>%
+  distinct()
+
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_pmh_preg_level_cns$PREG_ID))
+duplicates <- nimats_pmh_preg_level_cns[nimats_pmh_preg_level_cns$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_pmh_preg_level_cns %>% group_by(CNS_CODE, CNS_DESC) %>% count()
+# just use desc
+```
+
+```{r}
+nimats_pmh_preg_level_cns$CNS_DESC <- gsub(" ", "_", nimats_pmh_preg_level_cns$CNS_DESC)
+ 
+nimats_pmh_preg_level_cns %>% group_by(CNS_DESC) %>% count()
+```
+
+
+```{r}
+nimats_pmh_preg_level_cns_summary <- nimats_pmh_preg_level_cns %>%
+  select(PREG_ID, CNS_DESC) %>%
+  group_by(PREG_ID, CNS_DESC) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_pmh_preg_level_cns_summary$COUNT[nimats_pmh_preg_level_cns_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_pmh_preg_level_cns_wide <- nimats_pmh_preg_level_cns_summary %>%
+  pivot_wider(names_from = CNS_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_pmh_preg_level_cns_wide)[2:ncol(nimats_pmh_preg_level_cns_wide)] <- paste0("PMH_CNS_", colnames(nimats_pmh_preg_level_cns_wide)[2:ncol(nimats_pmh_preg_level_cns_wide)])
+head(nimats_pmh_preg_level_cns_wide)
+```
+
+
+```{r}
+nimats_pmh_preg_level <- left_join(nimats_pmh_preg_level, nimats_pmh_preg_level_cns_wide, by="PREG_ID")
+```
+
+
+__DIABETES__
+```{r}
+nimats_pmh_preg_level_diabetes <- nimats_pmh %>%
+  select(PREG_ID, DIABETES_CODE, DIABETES_DESC) %>%
+  distinct()
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_pmh_preg_level_diabetes$PREG_ID))
+duplicates <- nimats_pmh_preg_level_diabetes[nimats_pmh_preg_level_diabetes$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_pmh_preg_level_diabetes %>% group_by(DIABETES_CODE, DIABETES_DESC) %>% count()
+# just use desc
+```
+
+```{r}
+nimats_pmh_preg_level_diabetes$DIABETES_DESC <- gsub(" ", "_", nimats_pmh_preg_level_diabetes$DIABETES_DESC)
+ 
+nimats_pmh_preg_level_diabetes %>% group_by(DIABETES_DESC) %>% count()
+```
+
+
+```{r}
+nimats_pmh_preg_level_diabetes_summary <- nimats_pmh_preg_level_diabetes %>%
+  select(PREG_ID, DIABETES_DESC) %>%
+  group_by(PREG_ID, DIABETES_DESC) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_pmh_preg_level_diabetes_summary$COUNT[nimats_pmh_preg_level_diabetes_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_pmh_preg_level_diabetes_wide <- nimats_pmh_preg_level_diabetes_summary %>%
+  pivot_wider(names_from =DIABETES_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_pmh_preg_level_diabetes_wide)[2:ncol(nimats_pmh_preg_level_diabetes_wide)] <- paste0("PMH_DIABETES_", colnames(nimats_pmh_preg_level_diabetes_wide)[2:ncol(nimats_pmh_preg_level_diabetes_wide)])
+head(nimats_pmh_preg_level_diabetes_wide)
+```
+
+
+```{r}
+nimats_pmh_preg_level <- left_join(nimats_pmh_preg_level, nimats_pmh_preg_level_diabetes_wide, by="PREG_ID")
+```
+
+
+__GENERAL SURGERY__
+```{r}
+nimats_pmh_preg_level_gen_sx <- nimats_pmh %>%
+  select(PREG_ID, GENERAL_SURGERY_CODE, GENERAL_SURGERY_DESC) %>%
+  distinct()
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_pmh_preg_level_gen_sx$PREG_ID))
+duplicates <- nimats_pmh_preg_level_gen_sx[nimats_pmh_preg_level_gen_sx$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_pmh_preg_level_gen_sx %>% group_by(GENERAL_SURGERY_CODE, GENERAL_SURGERY_DESC) %>% count()
+# just use desc
+```
+
+```{r}
+nimats_pmh_preg_level_gen_sx$GENERAL_SURGERY_DESC <- gsub(" ", "_", nimats_pmh_preg_level_gen_sx$GENERAL_SURGERY_DESC)
+ 
+nimats_pmh_preg_level_gen_sx %>% group_by(GENERAL_SURGERY_DESC) %>% count()
+```
+
+
+```{r}
+nimats_pmh_preg_level_gen_sx_summary <- nimats_pmh_preg_level_gen_sx %>%
+  select(PREG_ID, GENERAL_SURGERY_DESC) %>%
+  group_by(PREG_ID, GENERAL_SURGERY_DESC) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_pmh_preg_level_gen_sx_summary$COUNT[nimats_pmh_preg_level_gen_sx_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_pmh_preg_level_gen_sx_wide <- nimats_pmh_preg_level_gen_sx_summary %>%
+  pivot_wider(names_from = GENERAL_SURGERY_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_pmh_preg_level_gen_sx_wide)[2:ncol(nimats_pmh_preg_level_gen_sx_wide)] <- paste0("PMH_GEN_SURGERY_", colnames(nimats_pmh_preg_level_gen_sx_wide)[2:ncol(nimats_pmh_preg_level_gen_sx_wide)])
+head(nimats_pmh_preg_level_gen_sx_wide)
+```
+
+
+```{r}
+nimats_pmh_preg_level <- left_join(nimats_pmh_preg_level, nimats_pmh_preg_level_gen_sx_wide, by="PREG_ID")
+```
+
+
+__GASTROINTESTINAL (GIT)__
+```{r}
+nimats_pmh_preg_level_git <- nimats_pmh %>%
+  select(PREG_ID, GIT_CODE, GIT_DESC) %>%
+  distinct()
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_pmh_preg_level_git$PREG_ID))
+duplicates <- nimats_pmh_preg_level_git[nimats_pmh_preg_level_git$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_pmh_preg_level_git %>% group_by(GIT_CODE, GIT_DESC) %>% count()
+# just use desc
+```
+
+```{r}
+nimats_pmh_preg_level_git$GIT_DESC <- gsub(" ", "_", nimats_pmh_preg_level_git$GIT_DESC)
+ 
+nimats_pmh_preg_level_git %>% group_by(GIT_DESC) %>% count()
+```
+
+
+```{r}
+nimats_pmh_preg_level_git_summary <- nimats_pmh_preg_level_git %>%
+  select(PREG_ID, GIT_DESC) %>%
+  group_by(PREG_ID, GIT_DESC) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_pmh_preg_level_git_summary$COUNT[nimats_pmh_preg_level_git_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_pmh_preg_level_git_wide <- nimats_pmh_preg_level_git_summary %>%
+  pivot_wider(names_from = GIT_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_pmh_preg_level_git_wide)[2:ncol(nimats_pmh_preg_level_git_wide)] <- paste0("PMH_GIT_", colnames(nimats_pmh_preg_level_git_wide)[2:ncol(nimats_pmh_preg_level_git_wide)])
+head(nimats_pmh_preg_level_git_wide)
+```
+
+
+```{r}
+nimats_pmh_preg_level <- left_join(nimats_pmh_preg_level, nimats_pmh_preg_level_git_wide, by="PREG_ID")
+```
+
+
+__GENITOURINARY (GU) INFECTION__
+```{r}
+nimats_pmh_preg_level_gu_infect <- nimats_pmh %>%
+  select(PREG_ID, GU_INFECTION_CODE, GU_INFECTION_DESC) %>%
+  distinct()
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_pmh_preg_level_gu_infect$PREG_ID))
+duplicates <- nimats_pmh_preg_level_gu_infect[nimats_pmh_preg_level_gu_infect$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_pmh_preg_level_gu_infect %>% group_by(GU_INFECTION_CODE, GU_INFECTION_DESC) %>% count()
+# just use desc
+```
+
+```{r}
+nimats_pmh_preg_level_gu_infect$GU_INFECTION_DESC <- gsub(" ", "_", nimats_pmh_preg_level_gu_infect$GU_INFECTION_DESC)
+ 
+nimats_pmh_preg_level_gu_infect %>% group_by(GU_INFECTION_DESC) %>% count()
+```
+
+
+```{r}
+nimats_pmh_preg_level_gu_infect_summary <- nimats_pmh_preg_level_gu_infect %>%
+  select(PREG_ID, GU_INFECTION_DESC) %>%
+  group_by(PREG_ID, GU_INFECTION_DESC) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_pmh_preg_level_gu_infect_summary$COUNT[nimats_pmh_preg_level_gu_infect_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_pmh_preg_level_gu_infect_wide <- nimats_pmh_preg_level_gu_infect_summary %>%
+  pivot_wider(names_from = GU_INFECTION_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_pmh_preg_level_gu_infect_wide)[2:ncol(nimats_pmh_preg_level_gu_infect_wide)] <- paste0("PMH_GU_INFECT_", colnames(nimats_pmh_preg_level_gu_infect_wide)[2:ncol(nimats_pmh_preg_level_gu_infect_wide)])
+head(nimats_pmh_preg_level_gu_infect_wide)
+```
+
+
+```{r}
+nimats_pmh_preg_level <- left_join(nimats_pmh_preg_level, nimats_pmh_preg_level_gu_infect_wide, by="PREG_ID")
+```
+
+
+__GYNAE__
+```{r}
+nimats_pmh_preg_level_gynae <- nimats_pmh %>%
+  select(PREG_ID, GYNAE_CODE, GYNAE_DESC) %>%
+  distinct()
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_pmh_preg_level_gynae$PREG_ID))
+duplicates <- nimats_pmh_preg_level_gynae[nimats_pmh_preg_level_gynae$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_pmh_preg_level_gynae %>% group_by(GYNAE_CODE, GYNAE_DESC) %>% count()
+# just use desc
+```
+
+```{r}
+nimats_pmh_preg_level_gynae$GYNAE_DESC <- gsub(" ", "_", nimats_pmh_preg_level_gynae$GYNAE_DESC)
+ 
+nimats_pmh_preg_level_gynae %>% group_by(GYNAE_DESC) %>% count()
+```
+
+
+```{r}
+nimats_pmh_preg_level_gynae_summary <- nimats_pmh_preg_level_gynae %>%
+  select(PREG_ID, GYNAE_DESC) %>%
+  group_by(PREG_ID, GYNAE_DESC) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_pmh_preg_level_gynae_summary$COUNT[nimats_pmh_preg_level_gynae_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_pmh_preg_level_gynae_wide <- nimats_pmh_preg_level_gynae_summary %>%
+  pivot_wider(names_from = GYNAE_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_pmh_preg_level_gynae_wide)[2:ncol(nimats_pmh_preg_level_gynae_wide)] <- paste0("PMH_GYNAE_", colnames(nimats_pmh_preg_level_gynae_wide)[2:ncol(nimats_pmh_preg_level_gynae_wide)])
+head(nimats_pmh_preg_level_gynae_wide)
+```
+
+
+```{r}
+nimats_pmh_preg_level <- left_join(nimats_pmh_preg_level, nimats_pmh_preg_level_gynae_wide, by="PREG_ID")
+```
+
+
+__INFECTION__
+```{r}
+nimats_pmh_preg_level_infection <- nimats_pmh %>%
+  select(PREG_ID, INFECTION_CODE, INFECTION_DESC) %>%
+  distinct()
+# additional rows added
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_pmh_preg_level_infection$PREG_ID))
+duplicates <- nimats_pmh_preg_level_infection[nimats_pmh_preg_level_infection$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_pmh_preg_level_infection %>% group_by(INFECTION_CODE, INFECTION_DESC) %>% count()
+# just use desc
+```
+
+```{r}
+nimats_pmh_preg_level_infection$INFECTION_DESC <- gsub(" ", "_", nimats_pmh_preg_level_infection$INFECTION_DESC)
+ 
+nimats_pmh_preg_level_infection %>% group_by(INFECTION_DESC) %>% count()
+```
+
+
+```{r}
+nimats_pmh_preg_level_infection_summary <- nimats_pmh_preg_level_infection %>%
+  select(PREG_ID, INFECTION_DESC) %>%
+  group_by(PREG_ID, INFECTION_DESC) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_pmh_preg_level_infection_summary$COUNT[nimats_pmh_preg_level_infection_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_pmh_preg_level_infection_wide <- nimats_pmh_preg_level_infection_summary %>%
+  pivot_wider(names_from = INFECTION_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_pmh_preg_level_infection_wide)[2:ncol(nimats_pmh_preg_level_infection_wide)] <- paste0("PMH_INFECTION_", colnames(nimats_pmh_preg_level_infection_wide)[2:ncol(nimats_pmh_preg_level_infection_wide)])
+head(nimats_pmh_preg_level_infection_wide)
+```
+
+
+```{r}
+nimats_pmh_preg_level <- left_join(nimats_pmh_preg_level, nimats_pmh_preg_level_infection_wide, by="PREG_ID")
+```
+
+
+__INFERTILITY__
+```{r}
+nimats_pmh_preg_level_infert <- nimats_pmh %>%
+  select(PREG_ID, INFERTILITY_CODE, INFERTILITY_DESC) %>%
+  distinct()
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_pmh_preg_level_infert$PREG_ID))
+duplicates <- nimats_pmh_preg_level_infert[nimats_pmh_preg_level_infert$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_pmh_preg_level_infert %>% group_by(INFERTILITY_CODE, INFERTILITY_DESC) %>% count()
+# just use desc
+```
+
+```{r}
+nimats_pmh_preg_level_infert$INFERTILITY_DESC <- gsub(" ", "_", nimats_pmh_preg_level_infert$INFERTILITY_DESC)
+ 
+nimats_pmh_preg_level_infert %>% group_by(INFERTILITY_DESC) %>% count()
+```
+
+
+```{r}
+nimats_pmh_preg_level_infert_summary <- nimats_pmh_preg_level_infert %>%
+  select(PREG_ID, INFERTILITY_DESC) %>%
+  group_by(PREG_ID, INFERTILITY_DESC) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_pmh_preg_level_infert_summary$COUNT[nimats_pmh_preg_level_infert_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_pmh_preg_level_infert_wide <- nimats_pmh_preg_level_infert_summary %>%
+  pivot_wider(names_from = INFERTILITY_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_pmh_preg_level_infert_wide)[2:ncol(nimats_pmh_preg_level_infert_wide)] <- paste0("PMH_INFERTILITY_", colnames(nimats_pmh_preg_level_infert_wide)[2:ncol(nimats_pmh_preg_level_infert_wide)])
+head(nimats_pmh_preg_level_infert_wide)
+```
+
+
+```{r}
+nimats_pmh_preg_level <- left_join(nimats_pmh_preg_level, nimats_pmh_preg_level_infert_wide, by="PREG_ID")
+```
+
+
+__MALIGNANCY__
+```{r}
+nimats_pmh_preg_level_malign <- nimats_pmh %>%
+  select(PREG_ID, MALIGNANCY_CODE, MALIGNANCY_DESC) %>%
+  distinct()
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_pmh_preg_level_malign$PREG_ID))
+duplicates <- nimats_pmh_preg_level_malign[nimats_pmh_preg_level_malign$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_pmh_preg_level_malign %>% group_by(MALIGNANCY_CODE, MALIGNANCY_DESC) %>% count()
+# just use desc
+```
+
+```{r}
+nimats_pmh_preg_level_malign$MALIGNANCY_DESC <- gsub(" ", "_", nimats_pmh_preg_level_malign$MALIGNANCY_DESC)
+ 
+nimats_pmh_preg_level_malign %>% group_by(MALIGNANCY_DESC) %>% count()
+```
+
+
+```{r}
+nimats_pmh_preg_level_malign_summary <- nimats_pmh_preg_level_malign %>%
+  select(PREG_ID, MALIGNANCY_DESC) %>%
+  group_by(PREG_ID, MALIGNANCY_DESC) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_pmh_preg_level_malign_summary$COUNT[nimats_pmh_preg_level_malign_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_pmh_preg_level_malign_wide <- nimats_pmh_preg_level_malign_summary %>%
+  pivot_wider(names_from = MALIGNANCY_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_pmh_preg_level_malign_wide)[2:ncol(nimats_pmh_preg_level_malign_wide)] <- paste0("PMH_MALIGNANCY_", colnames(nimats_pmh_preg_level_malign_wide)[2:ncol(nimats_pmh_preg_level_malign_wide)])
+head(nimats_pmh_preg_level_malign_wide)
+```
+
+
+```{r}
+nimats_pmh_preg_level <- left_join(nimats_pmh_preg_level, nimats_pmh_preg_level_malign_wide, by="PREG_ID")
+```
+
+
+
+
+__MENTAL HEALTH__
+```{r}
+nimats_pmh_preg_level_mh <- nimats_pmh %>%
+  select(PREG_ID, MENTAL_HEALTH_CODE, MENTAL_HEALTH_DESC) %>%
+  distinct()
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_pmh_preg_level_mh$PREG_ID))
+duplicates <- nimats_pmh_preg_level_mh[nimats_pmh_preg_level_mh$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_pmh_preg_level_mh %>% group_by(MENTAL_HEALTH_CODE, MENTAL_HEALTH_DESC) %>% count()
+# just use desc
+```
+
+```{r}
+nimats_pmh_preg_level_mh$MENTAL_HEALTH_DESC <- gsub(" ", "_", nimats_pmh_preg_level_mh$MENTAL_HEALTH_DESC)
+ 
+nimats_pmh_preg_level_mh %>% group_by(MENTAL_HEALTH_DESC) %>% count()
+```
+
+
+```{r}
+nimats_pmh_preg_level_mh_summary <- nimats_pmh_preg_level_mh %>%
+  select(PREG_ID, MENTAL_HEALTH_DESC) %>%
+  group_by(PREG_ID, MENTAL_HEALTH_DESC) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_pmh_preg_level_mh_summary$COUNT[nimats_pmh_preg_level_mh_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_pmh_preg_level_mh_wide <- nimats_pmh_preg_level_mh_summary %>%
+  pivot_wider(names_from = MENTAL_HEALTH_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_pmh_preg_level_mh_wide)[2:ncol(nimats_pmh_preg_level_mh_wide)] <- paste0("PMH_MENTAL_HEALTH_", colnames(nimats_pmh_preg_level_mh_wide)[2:ncol(nimats_pmh_preg_level_mh_wide)])
+head(nimats_pmh_preg_level_mh_wide)
+```
+
+
+```{r}
+nimats_pmh_preg_level <- left_join(nimats_pmh_preg_level, nimats_pmh_preg_level_mh_wide, by="PREG_ID")
+```
+
+
+__MENTAL HEALTH MINOR__
+```{r}
+nimats_pmh_preg_level_mh_minor <- nimats_pmh %>%
+  select(PREG_ID, MENTAL_HEALTH_MINOR_CODE, MENTAL_HEALTH_MINOR_DESC) %>%
+  distinct()
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_pmh_preg_level_mh_minor$PREG_ID))
+duplicates <- nimats_pmh_preg_level_mh_minor[nimats_pmh_preg_level_mh_minor$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_pmh_preg_level_mh_minor %>% group_by(MENTAL_HEALTH_MINOR_CODE, MENTAL_HEALTH_MINOR_DESC) %>% count()
+# just use desc
+```
+
+```{r}
+nimats_pmh_preg_level_mh_minor$MENTAL_HEALTH_MINOR_DESC <- gsub(" ", "_", nimats_pmh_preg_level_mh_minor$MENTAL_HEALTH_MINOR_DESC)
+ 
+nimats_pmh_preg_level_mh_minor %>% group_by(MENTAL_HEALTH_MINOR_DESC) %>% count()
+```
+
+
+```{r}
+nimats_pmh_preg_level_mh_minor_summary <- nimats_pmh_preg_level_mh_minor %>%
+  select(PREG_ID, MENTAL_HEALTH_MINOR_DESC) %>%
+  group_by(PREG_ID, MENTAL_HEALTH_MINOR_DESC) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_pmh_preg_level_mh_minor_summary$COUNT[nimats_pmh_preg_level_mh_minor_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_pmh_preg_level_mh_minor_wide <- nimats_pmh_preg_level_mh_minor_summary %>%
+  pivot_wider(names_from = MENTAL_HEALTH_MINOR_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_pmh_preg_level_mh_minor_wide)[2:ncol(nimats_pmh_preg_level_mh_minor_wide)] <- paste0("PMH_MH_MINOR_", colnames(nimats_pmh_preg_level_mh_minor_wide)[2:ncol(nimats_pmh_preg_level_mh_minor_wide)])
+head(nimats_pmh_preg_level_mh_minor_wide)
+```
+
+
+```{r}
+nimats_pmh_preg_level <- left_join(nimats_pmh_preg_level, nimats_pmh_preg_level_mh_minor_wide, by="PREG_ID")
+```
+
+
+__METABOLIC HEALTH__
+```{r}
+nimats_pmh_preg_level_metab <- nimats_pmh %>%
+  select(PREG_ID, METABOLIC_CODE, METABOLIC_DESC) %>%
+  distinct()
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_pmh_preg_level_metab$PREG_ID))
+duplicates <- nimats_pmh_preg_level_metab[nimats_pmh_preg_level_metab$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_pmh_preg_level_metab %>% group_by(METABOLIC_CODE, METABOLIC_DESC) %>% count()
+# just use desc
+```
+
+```{r}
+nimats_pmh_preg_level_metab$METABOLIC_DESC <- gsub(" ", "_", nimats_pmh_preg_level_metab$METABOLIC_DESC)
+ 
+nimats_pmh_preg_level_metab %>% group_by(METABOLIC_DESC) %>% count()
+```
+
+
+```{r}
+nimats_pmh_preg_level_metab_summary <- nimats_pmh_preg_level_metab %>%
+  select(PREG_ID, METABOLIC_DESC) %>%
+  group_by(PREG_ID, METABOLIC_DESC) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_pmh_preg_level_metab_summary$COUNT[nimats_pmh_preg_level_metab_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_pmh_preg_level_metab_wide <- nimats_pmh_preg_level_metab_summary %>%
+  pivot_wider(names_from = METABOLIC_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_pmh_preg_level_metab_wide)[2:ncol(nimats_pmh_preg_level_metab_wide)] <- paste0("PMH_METABOLIC_", colnames(nimats_pmh_preg_level_metab_wide)[2:ncol(nimats_pmh_preg_level_metab_wide)])
+head(nimats_pmh_preg_level_metab_wide)
+```
+
+
+```{r}
+nimats_pmh_preg_level <- left_join(nimats_pmh_preg_level, nimats_pmh_preg_level_metab_wide, by="PREG_ID")
+```
+
+
+__MUSCULOSKELETAL__
+```{r}
+nimats_pmh_preg_level_msk <- nimats_pmh %>%
+  select(PREG_ID, MUSCULO_SKELETAL_CODE, MUSCULO_SKELETAL_DESC) %>%
+  distinct()
+# additional rows added
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_pmh_preg_level_msk$PREG_ID))
+duplicates <- nimats_pmh_preg_level_msk[nimats_pmh_preg_level_msk$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_pmh_preg_level_msk %>% group_by(MUSCULO_SKELETAL_CODE, MUSCULO_SKELETAL_DESC) %>% count()
+# just use desc
+```
+
+```{r}
+nimats_pmh_preg_level_msk$MUSCULO_SKELETAL_DESC <- gsub(" ", "_", nimats_pmh_preg_level_msk$MUSCULO_SKELETAL_DESC)
+ 
+nimats_pmh_preg_level_msk %>% group_by(MUSCULO_SKELETAL_DESC) %>% count()
+```
+
+
+```{r}
+nimats_pmh_preg_level_msk_summary <- nimats_pmh_preg_level_msk %>%
+  select(PREG_ID, MUSCULO_SKELETAL_DESC) %>%
+  group_by(PREG_ID, MUSCULO_SKELETAL_DESC) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_pmh_preg_level_msk_summary$COUNT[nimats_pmh_preg_level_msk_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_pmh_preg_level_msk_wide <- nimats_pmh_preg_level_msk_summary %>%
+  pivot_wider(names_from = MUSCULO_SKELETAL_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_pmh_preg_level_msk_wide)[2:ncol(nimats_pmh_preg_level_msk_wide)] <- paste0("PMH_MSK_", colnames(nimats_pmh_preg_level_msk_wide)[2:ncol(nimats_pmh_preg_level_msk_wide)])
+head(nimats_pmh_preg_level_msk_wide)
+```
+
+
+```{r}
+nimats_pmh_preg_level <- left_join(nimats_pmh_preg_level, nimats_pmh_preg_level_msk_wide, by="PREG_ID")
+```
+
+
+__RENAL__
+```{r}
+nimats_pmh_preg_level_renal <- nimats_pmh %>%
+  select(PREG_ID, RENAL_CODE, RENAL_DESC) %>%
+  distinct()
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_pmh_preg_level_renal$PREG_ID))
+duplicates <- nimats_pmh_preg_level_renal[nimats_pmh_preg_level_renal$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_pmh_preg_level_renal %>% group_by(RENAL_CODE, RENAL_DESC) %>% count()
+# just use desc
+```
+
+```{r}
+nimats_pmh_preg_level_renal$RENAL_DESC <- gsub(" ", "_", nimats_pmh_preg_level_renal$RENAL_DESC)
+ 
+nimats_pmh_preg_level_renal %>% group_by(RENAL_DESC) %>% count()
+```
+
+
+```{r}
+nimats_pmh_preg_level_renal_summary <- nimats_pmh_preg_level_renal %>%
+  select(PREG_ID, RENAL_DESC) %>%
+  group_by(PREG_ID, RENAL_DESC) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_pmh_preg_level_renal_summary$COUNT[nimats_pmh_preg_level_renal_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_pmh_preg_level_renal_wide <- nimats_pmh_preg_level_renal_summary %>%
+  pivot_wider(names_from = RENAL_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_pmh_preg_level_renal_wide)[2:ncol(nimats_pmh_preg_level_renal_wide)] <- paste0("PMH_RENAL_", colnames(nimats_pmh_preg_level_renal_wide)[2:ncol(nimats_pmh_preg_level_renal_wide)])
+head(nimats_pmh_preg_level_renal_wide)
+```
+
+
+```{r}
+nimats_pmh_preg_level <- left_join(nimats_pmh_preg_level, nimats_pmh_preg_level_renal_wide, by="PREG_ID")
+```
+
+
+__RESPIRATORY__
+```{r}
+nimats_pmh_preg_level_resp <- nimats_pmh %>%
+  select(PREG_ID, RESPIRATORY_CODE, RESPIRATORY_DESC) %>%
+  distinct()
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_pmh_preg_level_resp$PREG_ID))
+duplicates <- nimats_pmh_preg_level_resp[nimats_pmh_preg_level_resp$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_pmh_preg_level_resp %>% group_by(RESPIRATORY_CODE, RESPIRATORY_DESC) %>% count()
+# just use desc
+```
+
+```{r}
+nimats_pmh_preg_level_resp$RESPIRATORY_DESC <- gsub(" ", "_", nimats_pmh_preg_level_resp$RESPIRATORY_DESC)
+ 
+nimats_pmh_preg_level_resp %>% group_by(RESPIRATORY_DESC) %>% count()
+```
+
+
+```{r}
+nimats_pmh_preg_level_resp_summary <- nimats_pmh_preg_level_resp %>%
+  select(PREG_ID, RESPIRATORY_DESC) %>%
+  group_by(PREG_ID, RESPIRATORY_DESC) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_pmh_preg_level_resp_summary$COUNT[nimats_pmh_preg_level_resp_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_pmh_preg_level_resp_wide <- nimats_pmh_preg_level_resp_summary %>%
+  pivot_wider(names_from = RESPIRATORY_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_pmh_preg_level_resp_wide)[2:ncol(nimats_pmh_preg_level_resp_wide)] <- paste0("PMH_RESPIRATORY_", colnames(nimats_pmh_preg_level_resp_wide)[2:ncol(nimats_pmh_preg_level_resp_wide)])
+head(nimats_pmh_preg_level_resp_wide)
+```
+
+
+```{r}
+nimats_pmh_preg_level <- left_join(nimats_pmh_preg_level, nimats_pmh_preg_level_resp_wide, by="PREG_ID")
+```
+
+
+__SKIN__
+```{r}
+nimats_pmh_preg_level_skin <- nimats_pmh %>%
+  select(PREG_ID, SKIN_CODE, SKIN_DESC) %>%
+  distinct()
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_pmh_preg_level_skin$PREG_ID))
+duplicates <- nimats_pmh_preg_level_skin[nimats_pmh_preg_level_skin$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_pmh_preg_level_skin %>% group_by(SKIN_CODE, SKIN_DESC) %>% count()
+# just use desc
+```
+
+```{r}
+nimats_pmh_preg_level_skin$SKIN_DESC <- gsub(" ", "_", nimats_pmh_preg_level_skin$SKIN_DESC)
+ 
+nimats_pmh_preg_level_skin %>% group_by(SKIN_DESC) %>% count()
+```
+
+
+```{r}
+nimats_pmh_preg_level_skin_summary <- nimats_pmh_preg_level_skin %>%
+  select(PREG_ID, SKIN_DESC) %>%
+  group_by(PREG_ID, SKIN_DESC) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_pmh_preg_level_skin_summary$COUNT[nimats_pmh_preg_level_skin_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_pmh_preg_level_skin_wide <- nimats_pmh_preg_level_skin_summary %>%
+  pivot_wider(names_from = SKIN_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_pmh_preg_level_skin_wide)[2:ncol(nimats_pmh_preg_level_skin_wide)] <- paste0("PMH_SKIN_", colnames(nimats_pmh_preg_level_skin_wide)[2:ncol(nimats_pmh_preg_level_skin_wide)])
+head(nimats_pmh_preg_level_skin_wide)
+```
+
+
+```{r}
+nimats_pmh_preg_level <- left_join(nimats_pmh_preg_level, nimats_pmh_preg_level_skin_wide, by="PREG_ID")
+```
+
+
+
+
+
+
+
+__WRITE TO CSV__
+```{r}
+write_csv(nimats_pmh_preg_level, file=paste0("S:/HBS_E062/3. DATA/nimats_pmh_preg_level_", format(lubridate::now(), "%Y.%m.%d_%H.%M"), ".csv"))
+```
+
+
+
+
+######################################
+#######           END          #######
+######################################
+

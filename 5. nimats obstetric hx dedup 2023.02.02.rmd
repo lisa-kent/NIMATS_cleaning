@@ -1,0 +1,172 @@
+---
+title: "MuM_PreDiCT: Deduplicate NIMATS obstetric history"
+output: html_notebook
+---
+
+last updated: 2023.02.08 (Lisa Kent)
+
+This notebook:
+* reads in raw NIMATS previous obstetric history table from database
+* explores and de-duplicates each variable (all pregnancy level variables)
+* builds a pregnancy level dataset
+* final dataset written to csv
+
+```{r}
+if(!require(tidyverse)) install.packages("tidyverse")
+library(tidyverse)
+```
+
+__Lode odbc (Open Database Connectivity) package__
+```{r}
+library(odbc)
+```
+
+__Declare connection to database__
+```{r}
+con <- dbConnect(odbc::odbc(), "hirusql3", timeout = 10)
+```
+
+
+
+__NIMATS OBSTETRIC HISTORY__
+```{r}
+nimats_obshx <- dbGetQuery(con,"Select * from [HDRNIHBS_E062].[Prev_Obstetric_History_1]")
+```
+
+
+```{r}
+head(nimats_obshx, 50)
+```
+
+
+__TRIM WHITE SPACE__
+```{r}
+nimats_obshx <- nimats_obshx %>%
+  mutate(across(everything(), str_trim))
+```
+
+__FIX NA VALUES__
+```{r}
+nimats_obshx[nimats_obshx =="<NA>"] <- NA
+```
+
+__COERCE DATES TO CORRECT FORMAT__
+```{r}
+nimats_obshx <- nimats_obshx %>%
+  mutate(DOB_MONTH = case_when(
+    DOB_MONTH == "JANUARY" ~ "01",
+    DOB_MONTH == "FEBRUARY" ~ "02",
+    DOB_MONTH == "MARCH" ~ "03",
+    DOB_MONTH == "APRIL" ~ "04",
+    DOB_MONTH == "MAY" ~ "05",
+    DOB_MONTH == "JUNE" ~ "06",
+    DOB_MONTH == "JULY" ~ "07",
+    DOB_MONTH == "AUGUST" ~ "08",
+    DOB_MONTH == "SEPTEMBER" ~ "09",
+    DOB_MONTH == "OCTOBER" ~ "10",
+    DOB_MONTH == "NOVEMBER" ~ "11",
+    DOB_MONTH == "DECEMBER" ~ "12",
+    
+  ))
+```
+
+
+__CREATE PREGNANCY LEVEL IDENTIFIER__
+```{r}
+nimats_obshx <- nimats_obshx %>%
+  unite(PREG_ID,
+        c("STUDY_ID", "DOB_YEAR", "DOB_MONTH"),
+        remove = F,
+        sep="_")
+
+head(nimats_obshx)
+  
+```
+
+
+
+__DEDUPLICATION OF PREG LEVEL DATA__
+```{r}
+# variables selected one by one to check if any causing duplicates
+nimats_obshx_preg_level <- nimats_obshx %>%
+  select(PREG_ID, DOB_MONTH, DOB_YEAR) %>%
+  distinct()
+
+```
+
+```{r}
+# sanity check (should all be same number)
+n_distinct(nimats_obshx$STUDY_ID, nimats_obshx$DOB_MONTH, nimats_obshx$DOB_YEAR)
+n_distinct(nimats_obshx$PREG_ID) 
+nrow(nimats_obshx_preg_level)
+```
+
+```{r}
+colnames(nimats_obshx)
+```
+
+```{r}
+nimats_obshx <- nimats_obshx %>%
+  mutate(#OHR_CONDITION = paste0("OHR_", OHR_CONDITION),
+         OHR_COND_DESC = paste0("OHR_", OHR_CONDITION, "_", OHR_DESCRIPTION))
+
+head(nimats_obshx, 50)
+```
+
+```{r}
+nimats_obshx$OHR_COND_DESC[nimats_obshx$OHR_COND_DESC == "OHR_NA_NA"] <- NA
+
+
+nimats_obshx$OHR_COND_DESC <- gsub(" ", "_", nimats_obshx$OHR_COND_DESC)
+ 
+nimats_obshx %>% group_by(OHR_COND_DESC) %>% count()
+
+head(nimats_obshx, 50)
+```
+
+
+
+__OHR CONDITION AND DESCRIPTION__
+```{r}
+nimats_obshx_preg_level_ohr <- nimats_obshx %>%
+  select(PREG_ID, OHR_COND_DESC) %>%
+  distinct()
+```
+
+
+```{r}
+nimats_obshx_preg_level_ohr_summary <- nimats_obshx_preg_level_ohr %>%
+  select(PREG_ID, OHR_COND_DESC) %>%
+  group_by(PREG_ID, OHR_COND_DESC) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_obshx_preg_level_ohr_summary$COUNT[nimats_obshx_preg_level_ohr_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_obshx_preg_level_ohr_summary_wide <- nimats_obshx_preg_level_ohr_summary %>%
+  pivot_wider(names_from = OHR_COND_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+
+```{r}
+head(nimats_obshx_preg_level_ohr_summary_wide, 50)
+```
+
+
+__WRITE TO CSV__
+```{r}
+write_csv(nimats_obshx_preg_level_ohr_summary_wide, file=paste0("S:/HBS_E062/3. DATA/nimats_obshx_preg_level_", format(lubridate::now(), "%Y.%m.%d_%H.%M"), ".csv"))
+```
+
+
+
+
+######################################
+#######           END          #######
+######################################

@@ -1,0 +1,425 @@
+---
+title: "MuM_PreDiCT: Connect to SQL Databases & Extract Data"
+output: html_notebook
+---
+
+
+last updated: 2023.02.24 (Lisa Kent)
+
+This notebook:
+* reads in raw NIMATS tables from database
+* explores meta data
+* NOTHING written to csv
+
+```{r}
+if(!require(tidyverse)) install.packages("tidyverse")
+library(tidyverse)
+```
+
+__Lode odbc (Open Database Connectivity) package__
+```{r}
+if(!require(odbc)) install.packages("odbc")
+library(odbc)
+```
+
+__Declare connection to database__
+```{r}
+con <- dbConnect(odbc::odbc(), "hirusql3", timeout = 10)
+```
+
+
+__Read in data from database and check__
+__Deaths Data__
+```{r}
+deaths <- dbGetQuery(con,"Select * from [HDRNIHBS_E062].[Death_Data_SeRP_1]")
+```
+
+```{r}
+head(deaths)
+```
+
+```{r}
+glimpse(deaths)
+```
+
+
+```{r}
+n_distinct(deaths$study_id)
+```
+
+```{r}
+deaths %>% group_by(death_year, death_month) %>% count()
+```
+
+
+
+__Read in data from database and check__
+__Prescribing Data__
+```{r}
+#likely to be very large!!!
+epd <- dbGetQuery(con,"Select * from [HDRNIHBS_E062].[EPD_1]")
+```
+
+
+```{r}
+head(epd)
+```
+
+```{r}
+glimpse(epd)
+#there does not appear to be any issue with trailing white space for any variable
+```
+
+
+
+```{r}
+n_distinct(epd$study_id)
+```
+
+```{r}
+epd %>% group_by(ISSUE_DATE) %>% count()
+
+#numbers seem reasonable from Jan2010 onwards
+#pattern observed where weekends and holidays have reduced number of prescriptions issued
+```
+
+```{r}
+epd %>% 
+  filter(ISSUE_DATE > "2020-02-04 00:00:00") %>% group_by(ISSUE_DATE) %>% count()
+
+#invalid dates: [EXAMPLES REMOVED FOR SDC]
+```
+
+
+```{r}
+sum(is.na(epd$ISSUE_DATE))
+#missing values present for issue date
+```
+
+```{r}
+epd %>% group_by(SCAN_YEAR, SCAN_MONTH) %>% count()
+
+# Earliest SCAN_YEAR & SCAN_MONTH: [EXAMPLES REMOVED FOR SDC], latest: [EXAMPLES REMOVED FOR SDC]
+# Check if numbers are as expected for earliest and latest months
+# [EXAMPLES REMOVED FOR SDC]
+
+```
+
+
+```{r}
+sum(is.na(epd$SCAN_YEAR))
+sum(is.na(epd$SCAN_MONTH))
+
+```
+
+
+```{r}
+# check for missing values
+sum(is.na(epd$vmp_nm))
+sum(is.na(epd$vtm_nm))
+sum(is.na(epd$quantity))
+sum(is.na(epd$presentation))
+sum(is.na(epd$strength))
+
+
+sum(is.na(epd$bnf_chapter))
+sum(is.na(epd$bnf_section))
+sum(is.na(epd$bnf_paragraph))
+sum(is.na(epd$bnf_sub_paragraph))
+
+```
+
+```{r}
+epd %>% group_by(bnf_chapter, bnf_section, bnf_paragraph, bnf_sub_paragraph) %>% count()
+
+```
+
+__Admissions Data__
+```{r}
+pas <- dbGetQuery(con,"Select * from [HDRNIHBS_E062].[PAS_1]")
+```
+
+```{r}
+colnames(pas)
+```
+
+```{r}
+glimpse(pas)
+#there is trailing white space for some variables
+```
+
+```{r}
+pas <- pas %>% 
+  mutate(across(where(is.character), str_trim))
+
+glimpse(pas)
+```
+
+```{r}
+head(pas, 20)
+```
+
+```{r}
+n_distinct(pas$study_id)
+```
+
+
+
+
+
+__NIMATS General Data__
+```{r}
+nimats_gen <- dbGetQuery(con,"Select * from [HDRNIHBS_E062].[General_Data_v2_1]")
+```
+
+```{r}
+colnames(nimats_gen)
+```
+
+
+
+```{r}
+n_distinct(nimats_gen$STUDY_ID)
+n_distinct(nimats_gen$CHILD_ID)
+```
+
+```{r}
+n_distinct(nimats_gen$STUDY_ID, nimats_gen$CHILD_ID)
+sum(is.na(nimats_gen$STUDY_ID))
+sum(is.na(nimats_gen$CHILD_ID))
+#there are more unique mum-child combinations that unique children - due to NA's in CHILD_ID
+```
+
+
+```{r}
+n_distinct(nimats_gen$STUDY_ID, nimats_gen$DOB_YEAR, nimats_gen$DOB_MONTH)
+```
+
+
+```{r}
+n_distinct(nimats_gen$STUDY_ID, nimats_gen$CHILD_ID) - n_distinct(nimats_gen$CHILD_ID)
+```
+
+```{r}
+nimats_gen %>% group_by(DOB_YEAR, DOB_MONTH) %>% count()
+```
+
+```{r}
+head(nimats_gen, 50)
+```
+
+```{r}
+sum(is.na(nimats_gen$LMP))
+sum(is.na(nimats_gen$ACTUAL_EDC))
+```
+
+
+```{r}
+nimats_gen %>% group_by(AGE_AT_BIRTH) %>% count()
+```
+
+
+
+```{r}
+nimats_gen %>% group_by(DOB_YEAR, BIRTH_STATUS) %>% count()
+```
+
+
+__NIMATS Delivery Details Data__
+```{r}
+nimats_dd <- dbGetQuery(con,"Select * from [HDRNIHBS_E062].[Delivery_Details_v2_1]")
+```
+
+```{r}
+colnames(nimats_dd)
+```
+
+```{r}
+glimpse(nimats_dd)
+```
+
+
+
+```{r}
+n_distinct(nimats_dd$STUDY_ID)
+n_distinct(nimats_dd$CHILD_ID)
+```
+
+
+```{r}
+n_distinct(nimats_dd$STUDY_ID, nimats_dd$CHILD_ID)
+#there are more unique mum-child combinations that unique children 
+```
+
+```{r}
+sum(is.na(nimats_dd$STUDY_ID))
+sum(is.na(nimats_dd$CHILD_ID))
+#as with gen data, missing child_id's likely causing this issue
+```
+
+```{r}
+nimats_dd %>% group_by(DOB_YEAR, DOB_MONTH) %>% count()
+```
+
+
+```{r}
+head(nimats_dd, 50)
+```
+
+
+__check if descriptions and codes match as per NIMATS metadata__
+```{r}
+nimats_dd %>% group_by(DOB_YEAR, SURGERY_CODE, SURGERY_DESC) %>% count()
+```
+
+```{r}
+nimats_dd %>% group_by(PROBLEMS_AFFECTING_LABOUR_CODE, problems_affecting_labour_desc) %>% count()
+```
+
+
+```{r}
+nimats_dd %>% group_by(PRESENT_PREG_PROBLEMS_CODE, present_preg_problems_desc) %>% count()
+```
+
+```{r}
+nimats_dd %>% group_by(ANTENATAL_STEROIDS, antenatal_steroids_desc) %>% count()
+```
+
+```{r}
+nimats_dd %>% group_by(DOB_YEAR, DOB_MONTH, antenatal_steroids_desc) %>% count()
+```
+
+
+__NIMATS Previous Medical History Data__
+```{r}
+nimats_pmh <- dbGetQuery(con,"Select * from [HDRNIHBS_E062].[Prev_Medical_History_1]")
+```
+
+```{r}
+glimpse(nimats_pmh)
+#trailing white space in character variables
+```
+
+```{r}
+colnames(nimats_pmh)
+```
+
+```{r}
+n_distinct(nimats_pmh$STUDY_ID)
+n_distinct(nimats_pmh$CHILD_ID)
+```
+
+
+```{r}
+n_distinct(nimats_pmh$STUDY_ID, nimats_pmh$CHILD_ID)
+#there are more unique mum-child combinations that unique children 
+```
+
+```{r}
+sum(is.na(nimats_pmh$STUDY_ID))
+sum(is.na(nimats_pmh$CHILD_ID))
+#as with gen data, missing child_id's likely causing this issue
+```
+
+```{r}
+nimats_pmh %>% group_by(DOB_YEAR, DOB_MONTH) %>% count()
+```
+
+
+```{r}
+nimats_pmh %>% group_by(BLOOD_DISORDERS_CODE, BLOOD_DISORDERS_DESC) %>% count()
+
+nimats_pmh %>% group_by(CARDIOVASCULAR_CODE, CARDIOVASCULAR_DESC) %>% count()
+
+nimats_pmh %>% group_by(CNS_CODE, CNS_DESC) %>% count()
+
+nimats_pmh %>% group_by(DIABETES_CODE, DIABETES_DESC) %>% count()
+
+nimats_pmh %>% group_by(GENERAL_SURGERY_CODE, GENERAL_SURGERY_DESC) %>% count()
+
+nimats_pmh %>% group_by(GIT_CODE, GIT_DESC) %>% count()
+
+nimats_pmh %>% group_by(GU_INFECTION_CODE, GU_INFECTION_DESC) %>% count()
+
+nimats_pmh %>% group_by(GYNAE_CODE, GYNAE_DESC) %>% count()
+
+nimats_pmh %>% group_by(INFECTION_CODE, INFECTION_DESC) %>% count()
+
+nimats_pmh %>% group_by(INFERTILITY_CODE, INFERTILITY_DESC) %>% count()
+
+nimats_pmh %>% group_by(MALIGNANCY_CODE, MALIGNANCY_DESC) %>% count()
+
+nimats_pmh %>% group_by(MENTAL_HEALTH_CODE, MENTAL_HEALTH_DESC) %>% count()
+
+nimats_pmh %>% group_by(MENTAL_HEALTH_MINOR_CODE, MENTAL_HEALTH_MINOR_DESC) %>% count()
+
+nimats_pmh %>% group_by(METABOLIC_CODE, METABOLIC_DESC) %>% count()
+
+nimats_pmh %>% group_by(MUSCULO_SKELETAL_CODE, MUSCULO_SKELETAL_DESC) %>% count()
+
+nimats_pmh %>% group_by(RENAL_CODE, RENAL_DESC) %>% count()
+
+nimats_pmh %>% group_by(RESPIRATORY_CODE, RESPIRATORY_DESC) %>% count()
+
+nimats_pmh %>% group_by(SKIN_CODE, SKIN_DESC) %>% count()
+
+
+```
+
+
+
+__NIMATS Specified Condition (PMHx Free Text) Data__
+```{r}
+nimats_cond <- dbGetQuery(con,"Select * from [HDRNIHBS_E062].[Specified_Condition_1]")
+```
+
+```{r}
+glimpse(nimats_cond)
+#trailing white space in character variables
+```
+
+```{r}
+n_distinct(nimats_cond$study_id)
+n_distinct(nimats_cond$child_id)
+sum(is.na(nimats_cond$child_id))
+sum(is.na(nimats_cond$AUTOIMMUNE_SKIN))
+```
+
+```{r}
+summary(nimats_cond)
+```
+
+
+```{r}
+colnames(nimats_cond)
+```
+
+
+
+
+__NIMATS Previous Obstetric History Data__
+```{r}
+nimats_obshx <- dbGetQuery(con,"Select * from [HDRNIHBS_E062].[Prev_Obstetric_History_1]")
+```
+
+```{r}
+glimpse(nimats_obshx)
+#trailing white space in character variables
+```
+
+```{r}
+colnames(nimats_obshx)
+```
+
+```{r}
+n_distinct(nimats_obshx$STUDY_ID)
+n_distinct(nimats_obshx$STUDY_ID, nimats_obshx$DOB_MONTH, nimats_obshx$DOB_YEAR)
+n_distinct(nimats_obshx$CHILD_ID)
+sum(is.na(nimats_obshx$CHILD_ID))
+```
+
+
+```{r}
+nimats_obshx %>% group_by(OHR_CONDITION, OHR_CODE, OHR_DESCRIPTION) %>% count()
+```
+

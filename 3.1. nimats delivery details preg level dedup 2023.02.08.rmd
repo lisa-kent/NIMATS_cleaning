@@ -1,0 +1,320 @@
+---
+title: "MuM_PreDiCT: Deduplicate NIMATS delivery details data at pregnancy level"
+output: html_notebook
+---
+
+last updated: 2023.02.08 (Lisa Kent)
+
+This notebook:
+* reads in raw NIMATS delivery details table from database
+* explores and de-duplicates each pregnancy level variable (dropping infant level variables)
+* builds a pregnancy level dataset
+* final dataset written to csv
+
+```{r}
+if(!require(tidyverse)) install.packages("tidyverse")
+library(tidyverse)
+```
+
+__Lode odbc (Open Database Connectivity) package__
+```{r}
+library(odbc)
+```
+
+__Declare connection to database__
+```{r}
+con <- dbConnect(odbc::odbc(), "hirusql3", timeout = 10)
+```
+
+
+
+__NIMATS Delivery Details__
+```{r}
+nimats_dd <- dbGetQuery(con,"Select * from [HDRNIHBS_E062].[Delivery_Details_v2_1]")
+```
+
+
+```{r}
+head(nimats_dd, 50)
+```
+
+
+__TRIM WHITE SPACE__
+```{r}
+nimats_dd <- nimats_dd %>%
+  mutate(across(everything(), str_trim))
+```
+
+__FIX NA VALUES__
+```{r}
+nimats_dd[nimats_dd =="<NA>"] <- NA
+```
+
+__COERCE DATES TO CORRECT FORMAT__
+```{r}
+nimats_dd <- nimats_dd %>%
+  mutate(DOB_MONTH = case_when(
+    DOB_MONTH == "JANUARY" ~ "01",
+    DOB_MONTH == "FEBRUARY" ~ "02",
+    DOB_MONTH == "MARCH" ~ "03",
+    DOB_MONTH == "APRIL" ~ "04",
+    DOB_MONTH == "MAY" ~ "05",
+    DOB_MONTH == "JUNE" ~ "06",
+    DOB_MONTH == "JULY" ~ "07",
+    DOB_MONTH == "AUGUST" ~ "08",
+    DOB_MONTH == "SEPTEMBER" ~ "09",
+    DOB_MONTH == "OCTOBER" ~ "10",
+    DOB_MONTH == "NOVEMBER" ~ "11",
+    DOB_MONTH == "DECEMBER" ~ "12",
+    
+  ))
+```
+
+
+__CREATE PREGNANCY LEVEL IDENTIFIER__
+```{r}
+nimats_dd <- nimats_dd %>%
+  unite(PREG_ID,
+        c("STUDY_ID", "DOB_YEAR", "DOB_MONTH"),
+        remove = F,
+        sep="_")
+  
+```
+
+
+__CREATE PREGNANCY LEVEL COHORT SPINE__
+
+```{r}
+# variables selected one by one to check if any causing duplicates
+nimats_dd_preg_level <- nimats_dd %>%
+  select(PREG_ID, DOB_MONTH, DOB_YEAR) %>%
+  distinct()
+```
+
+
+```{r}
+#sanity check (should all be same number)
+n_distinct(nimats_dd$STUDY_ID, nimats_dd$DOB_MONTH, nimats_dd$DOB_YEAR)
+n_distinct(nimats_dd$PREG_ID)
+nrow(nimats_dd_preg_level)
+```
+```{r}
+colnames(nimats_dd)
+```
+
+
+
+__DEDUPLICATION OF PREG LEVEL DATA__
+
+__SURGERY__
+```{r}
+nimats_dd_preg_level_surgery <- nimats_dd %>%
+  select(PREG_ID, SURGERY_CODE, SURGERY_DESC) %>%
+  distinct()
+# no additional rows 
+```
+
+
+```{r}
+nimats_dd_preg_level <- left_join(nimats_dd_preg_level, nimats_dd_preg_level_surgery, by="PREG_ID")
+```
+
+
+__PROBLEMS AFFECTING LABOUR__
+```{r}
+nimats_dd_preg_level_pal <- nimats_dd %>%
+  select(PREG_ID, PROBLEMS_AFFECTING_LABOUR_CODE, problems_affecting_labour_desc) %>%
+  distinct()
+# 349 additional rows added
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_dd_preg_level_pal$PREG_ID))
+duplicates <- nimats_dd_preg_level_pal[nimats_dd_preg_level_pal$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_dd_preg_level_pal %>% group_by(PROBLEMS_AFFECTING_LABOUR_CODE, problems_affecting_labour_desc) %>% count()
+# code matches desc therefore just use desc
+```
+
+```{r}
+nimats_dd_preg_level_pal$problems_affecting_labour_desc <- gsub(" ", "_", nimats_dd_preg_level_pal$problems_affecting_labour_desc)
+ 
+nimats_dd_preg_level_pal %>% group_by(problems_affecting_labour_desc) %>% count()
+```
+
+
+```{r}
+nimats_dd_preg_level_pal_summary <- nimats_dd_preg_level_pal %>%
+  select(PREG_ID, problems_affecting_labour_desc) %>%
+  group_by(PREG_ID, problems_affecting_labour_desc) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_dd_preg_level_pal_summary$COUNT[nimats_dd_preg_level_pal_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_dd_preg_level_pal_wide <- nimats_dd_preg_level_pal_summary %>%
+  pivot_wider(names_from = problems_affecting_labour_desc,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_dd_preg_level_pal_wide)[2:ncol(nimats_dd_preg_level_pal_wide)] <- paste0("PROB_AFF_LABOUR_", colnames(nimats_dd_preg_level_pal_wide)[2:ncol(nimats_dd_preg_level_pal_wide)])
+head(nimats_dd_preg_level_pal_wide)
+```
+
+
+```{r}
+nimats_dd_preg_level <- left_join(nimats_dd_preg_level, nimats_dd_preg_level_pal_wide, by="PREG_ID")
+```
+
+
+
+__PRESENT PREGNANCY PROBLEMS__
+```{r}
+nimats_dd_preg_level_ppp <- nimats_dd %>%
+  select(PREG_ID, PRESENT_PREG_PROBLEMS_CODE, present_preg_problems_desc) %>%
+  distinct()
+# 46,558 additional rows added
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_dd_preg_level_ppp$PREG_ID))
+duplicates <- nimats_dd_preg_level_ppp[nimats_dd_preg_level_ppp$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - several values possible in same pregnancy
+# 
+# solution = dummy variables
+```
+
+```{r}
+nimats_dd_preg_level_ppp %>% group_by(PRESENT_PREG_PROBLEMS_CODE, present_preg_problems_desc) %>% count()
+# code matches desc therefore just use desc
+```
+
+
+```{r}
+nimats_dd_preg_level_ppp$present_preg_problems_desc <- gsub(" ", "_", nimats_dd_preg_level_ppp$present_preg_problems_desc)
+ 
+nimats_dd_preg_level_ppp %>% group_by(present_preg_problems_desc) %>% count()
+```
+
+
+```{r}
+nimats_dd_preg_level_ppp_summary <- nimats_dd_preg_level_ppp %>%
+  select(PREG_ID, present_preg_problems_desc) %>%
+  group_by(PREG_ID, present_preg_problems_desc) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_dd_preg_level_ppp_summary$COUNT[nimats_dd_preg_level_ppp_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_dd_preg_level_ppp_wide <- nimats_dd_preg_level_ppp_summary %>%
+  pivot_wider(names_from = present_preg_problems_desc,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_dd_preg_level_ppp_wide)[2:ncol(nimats_dd_preg_level_ppp_wide)] <- paste0("PRES_PREG_PROB_", colnames(nimats_dd_preg_level_ppp_wide)[2:ncol(nimats_dd_preg_level_ppp_wide)])
+head(nimats_dd_preg_level_ppp_wide)
+```
+
+
+```{r}
+nimats_dd_preg_level <- left_join(nimats_dd_preg_level, nimats_dd_preg_level_ppp_wide, by="PREG_ID")
+```
+
+
+__ANTENATAL STEROIDS__
+```{r}
+nimats_dd_preg_level_steroids <- nimats_dd %>%
+  select(PREG_ID, ANTENATAL_STEROIDS, antenatal_steroids_desc) %>%
+  distinct()
+
+```
+
+
+```{r}
+n_occur <- data.frame(table(nimats_dd_preg_level_steroids$PREG_ID))
+duplicates <- nimats_dd_preg_level_steroids[nimats_dd_preg_level_steroids$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - duplicates mainly have differing values values
+# is it possible that steroids could be given both <48h and >48h from birth
+# could a second dose be given?
+# solution = dummy variables (with option to contract again at later stage)
+```
+
+```{r}
+nimats_dd_preg_level_steroids %>% group_by(ANTENATAL_STEROIDS, antenatal_steroids_desc) %>% count()
+# code matches desc therefore just use desc
+```
+
+
+```{r}
+nimats_dd_preg_level_steroids$antenatal_steroids_desc <- gsub(" ", "", nimats_dd_preg_level_steroids$antenatal_steroids_desc)
+ 
+nimats_dd_preg_level_steroids %>% group_by(antenatal_steroids_desc) %>% count()
+```
+
+
+```{r}
+nimats_dd_preg_level_steroids_summary <- nimats_dd_preg_level_steroids %>%
+  select(PREG_ID, antenatal_steroids_desc) %>%
+  group_by(PREG_ID, antenatal_steroids_desc) %>%
+  summarise(COUNT = n())
+```
+
+
+```{r}
+nimats_dd_preg_level_steroids_summary$COUNT[nimats_dd_preg_level_steroids_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_dd_preg_level_steroids_wide <- nimats_dd_preg_level_steroids_summary %>%
+  pivot_wider(names_from = antenatal_steroids_desc,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_dd_preg_level_steroids_wide)[2:ncol(nimats_dd_preg_level_steroids_wide)] <- paste0("ANTENATAL_STEROID_", colnames(nimats_dd_preg_level_steroids_wide)[2:ncol(nimats_dd_preg_level_steroids_wide)])
+head(nimats_dd_preg_level_steroids_wide)
+```
+
+
+```{r}
+nimats_dd_preg_level <- left_join(nimats_dd_preg_level, nimats_dd_preg_level_steroids_wide, by="PREG_ID")
+```
+
+
+
+
+
+__WRITE TO CSV__
+```{r}
+write_csv(nimats_dd_preg_level, file=paste0("S:/HBS_E062/3. DATA/nimats_dd_preg_level_", format(lubridate::now(), "%Y.%m.%d_%H.%M"), ".csv"))
+```
+
+
+
+
+######################################
+#######           END          #######
+######################################
+
+

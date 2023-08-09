@@ -1,0 +1,97 @@
+---
+title: "MuM_PreDiCT:NIMATS Dates"
+output: html_notebook
+---
+
+last updated: 2023.03.01 (Lisa Kent)
+
+This notebook:
+* 
+
+################
+
+
+```{r}
+if(!require(tidyverse)) install.packages("tidyverse")
+library(tidyverse)
+```
+
+
+__PREGNANCY LEVEL NIMATS DATES__
+```{r}
+#only read in if not already in environment
+#nimats_preg_level <- read_csv("S:/HBS_E062/3. DATA/nimats_preg_level_2023.03.06_14.33.csv")
+```
+
+
+```{r}
+nimats_dates <- nimats_preg_level %>% select(STUDY_ID, PREG_ID, DOB_YEAR, DOB_MONTH, LMP, EDC, EDC_CONFIRMED_ULTRASOUND, ACTUAL_EDC, GEST_AT_BOOKING_DAYS, GEST_AT_DELIVERY_DAYS, AGE_AT_BIRTH)
+```
+
+
+```{r}
+#coerce to correct class
+nimats_dates$LMP <- as.Date(nimats_dates$LMP, format = "%d/%m/%Y")
+nimats_dates$EDC <- as.Date(nimats_dates$EDC, format = "%d/%m/%Y")
+nimats_dates$EDC_CONFIRMED_ULTRASOUND <- as.Date(nimats_dates$EDC_CONFIRMED_ULTRASOUND, format = "%d/%m/%Y")
+nimats_dates$ACTUAL_EDC <- as.Date(nimats_dates$ACTUAL_EDC, format = "%d/%m/%Y")
+nimats_dates$GEST_AT_BOOKING_DAYS <- as.numeric(nimats_dates$GEST_AT_BOOKING_DAYS)
+nimats_dates$GEST_AT_DELIVERY_DAYS <- as.numeric(nimats_dates$GEST_AT_DELIVERY_DAYS)
+head(nimats_dates)
+```
+
+
+```{r}
+#check for missing
+sum(is.na(nimats_dates$GEST_AT_DELIVERY_DAYS))
+sum(is.na(nimats_dates$ACTUAL_EDC))
+```
+
+
+```{r}
+#closer check of cases with missing data in required variables
+nimats_dates %>%
+  filter(is.na(GEST_AT_DELIVERY_DAYS))
+
+nimats_dates %>%
+  filter(is.na(ACTUAL_EDC))
+
+```
+
+```{r}
+#remove pregnancies where ACTUAL_EDC AND GEST_AT_DELIVERY_DAYS are missing
+nimats_dates <- nimats_dates %>%
+  filter(!(is.na(GEST_AT_DELIVERY_DAYS) | is.na(ACTUAL_EDC)))
+```
+
+
+
+```{r}
+# LMP_CALC = ACTUAL_EDC - 280 days (i.e. length of a full term pregnancy)
+
+# RCOG trimesters
+# T1 "up to around 13 weeks"
+# T2 "13 weeks to 26 weeks"
+# T3 "27 weeks +"
+
+nimats_dates <- nimats_dates %>%
+  mutate(LMP_CALC = ACTUAL_EDC-280,
+         T1_START = LMP_CALC,
+         T1_END = LMP_CALC+90
+         
+         )
+#sanity check
+nimats_dates %>% head(100)
+
+```
+
+
+```{r}
+write_csv(nimats_dates, file=paste0("S:/HBS_E062/3. DATA/nimats_dates_", format(lubridate::now(), "%Y.%m.%d_%H.%M"),".csv"))
+
+```
+
+
+######################################
+#######           END          #######
+######################################

@@ -1,0 +1,944 @@
+---
+title: "MuM_PreDiCT: Deduplicate NIMATS general data at pregnancy level"
+output: html_notebook
+---
+
+
+last updated: 2023.02.06 (Lisa Kent)
+
+This notebook reads in raw NIMATS general dataset from database, explores and fixes duplicates for each pregnancy level variable (dropping infant level variables) and builds a pregnancy level dataset.  Final dataset written to csv.
+
+
+NB: Creation of deduplicated infant level dataset dealt with in separate script
+
+
+```{r}
+if(!require(tidyverse)) install.packages("tidyverse")
+library(tidyverse)
+```
+
+__Lode odbc (Open Database Connectivity) package__
+```{r}
+library(odbc)
+```
+
+__Declare connection to database__
+```{r}
+con <- dbConnect(odbc::odbc(), "hirusql3", timeout = 10)
+```
+
+
+
+__NIMATS General Data__
+```{r}
+nimats_gen_raw <- dbGetQuery(con,"Select * from [HDRNIHBS_E062].[General_Data_v2_1]")
+```
+
+```{r}
+nimats_gen <- nimats_gen_raw
+```
+
+
+```{r}
+head(nimats_gen, 50)
+```
+__TRIM WHITE SPACE__
+```{r}
+nimats_gen <- nimats_gen %>%
+  mutate(across(everything(), str_trim))
+```
+
+__FIX NA VALUES__
+```{r}
+nimats_gen[nimats_gen =="<NA>"] <- NA
+```
+
+__COERCE DATES TO CORRECT FORMAT__
+```{r}
+nimats_gen <- nimats_gen %>%
+  mutate(DOB_MONTH = case_when(
+    DOB_MONTH == "JANUARY" ~ "01",
+    DOB_MONTH == "FEBRUARY" ~ "02",
+    DOB_MONTH == "MARCH" ~ "03",
+    DOB_MONTH == "APRIL" ~ "04",
+    DOB_MONTH == "MAY" ~ "05",
+    DOB_MONTH == "JUNE" ~ "06",
+    DOB_MONTH == "JULY" ~ "07",
+    DOB_MONTH == "AUGUST" ~ "08",
+    DOB_MONTH == "SEPTEMBER" ~ "09",
+    DOB_MONTH == "OCTOBER" ~ "10",
+    DOB_MONTH == "NOVEMBER" ~ "11",
+    DOB_MONTH == "DECEMBER" ~ "12",
+    
+  ))
+```
+
+
+__CREATE PREGNANCY LEVEL IDENTIFIER__
+```{r}
+nimats_gen <- nimats_gen %>%
+  unite(PREG_ID,
+        c("STUDY_ID", "DOB_YEAR", "DOB_MONTH"),
+        remove = F,
+        sep="_")
+  
+```
+
+
+```{r}
+n_distinct(nimats_gen$PREG_ID)
+```
+
+
+
+```{r}
+head(nimats_gen)
+```
+
+
+__DEDUPLICATION OF PREG LEVEL DATA__
+```{r}
+# variables selected one by one to check if any causing duplicates
+nimats_preg_level <- nimats_gen %>%
+  select(PREG_ID, STUDY_ID, DOB_MONTH, DOB_YEAR, LMP, PLANNED_PREGNANCY) %>%
+  distinct()
+
+#LMP no additional rows
+#planned_pregnancy found to cause duplicates 
+```
+
+```{r}
+nimats_preg_level <- drop_na(nimats_preg_level, DOB_YEAR)
+```
+
+
+```{r}
+#identify when duplicate study IDs occur and pull them in to dataframe for inspection
+
+n_occur <- data.frame(table(nimats_preg_level$PREG_ID))
+duplicates <- nimats_preg_level[nimats_preg_level$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+duplicates
+
+# duplicates appear to have one valid and one NA value each
+# therefore remove NA values to deduplicate
+```
+
+
+```{r}
+nimats_preg_level <- nimats_preg_level %>%
+  group_by(PREG_ID)%>%
+  slice(which.max(!is.na(PLANNED_PREGNANCY)))
+```
+
+```{r}
+# variables selected one by one to check if any causing duplicates
+nimats_preg_level_site <- nimats_gen %>%
+  select(PREG_ID, SITE) %>%
+  distinct()
+
+#SITE found to cause duplicates 
+```
+
+```{r}
+#identify when duplicate study IDs occur and pull them in to dataframe for inspection
+
+n_occur <- data.frame(table(nimats_preg_level_site$PREG_ID))
+duplicates <- nimats_preg_level_site[nimats_preg_level_site$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+
+# duplicates appear to have different SITES recorded. 
+# unable to verify which site is correct therefore replace with NA
+```
+
+```{r}
+#identify which PREG_IDs associated with duplicates, replace SITE with NA, then de-duplicate
+nimats_preg_level_site$SITE[nimats_preg_level_site$PREG_ID %in% duplicates$PREG_ID] <- NA
+nimats_preg_level_site <- nimats_preg_level_site %>%
+  distinct()
+```
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_site, by=("PREG_ID"))
+```
+
+
+
+```{r}
+#SMOKING: “Indicate how many cigarettes the mother smokes per day” [Intrapartum menu / Avail throughout]
+
+#CURRENTLY_SMOKING: “Describes whether or not the woman is currently smoking” [Booking menu, also on postnatal menu since 31Oct2019 / Avail since Sept 2016]
+#01 = Never smoked
+#02 = No, stopped smoking this pregnancy
+#03 = No, stopped smoking prior to this pregnancy
+#04 = Yes
+
+#CIGARETTES_SMOKED_PRE_DAY: **spelling error** “This indicates the number of cigarettes the woman usually smokes per day.  The value must be between 0 and 99” [Booking menu / Avail since Sept 2016]
+
+
+nimats_preg_level_smoke <- nimats_gen %>%
+  select(PREG_ID, SMOKING, CURRENTLY_SMOKING, CIGARETTES_SMOKED_PRE_DAY) %>%
+  distinct()
+#SMOKING => XXXX additional rows
+#CURRENTLY_SMOKING => XXXX additional rows
+#CIGARETTES_SMOKED_PRE_DAY => XXXX additional rows
+```
+
+```{r}
+names(nimats_preg_level_smoke)[names(nimats_preg_level_smoke) == "CIGARETTES_SMOKED_PRE_DAY"] <- "CIGARETTES_SMOKED_PER_DAY"
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_preg_level_smoke$PREG_ID))
+duplicates <- nimats_preg_level_smoke[nimats_preg_level_smoke$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+
+#visual inspection of duplicates
+#CURRENTLY_SMOKING - several different values can be recorded against the same PREG_ID - solution = take highest value so as to capture if prev/currently smoking)
+
+#CIGARETTES_SMOKED_PER_DAY - several different values can be recorded against the same PREG_ID - solution = take highest value (**CAUTION** grouping of values "10+" & "20+" has coerced this to a string variable **CAUTION**)
+```
+
+```{r}
+nimats_gen %>% group_by(DOB_YEAR, CURRENTLY_SMOKING) %>% count()
+
+nimats_gen %>% group_by(DOB_YEAR, CIGARETTES_SMOKED_PRE_DAY) %>% count()
+
+#although these variables were added in Sep 2016, there are still substantial missing values in 2017.  2018 onwards seems ok.
+```
+
+
+```{r}
+
+#   CIGARETTES_SMOKED_PER_DAY - remove non-num characters and coerce to numerical
+#   for each smoking vars take max value in each duplicated PREG_ID
+
+nimats_preg_level_smoke_1 <- nimats_preg_level_smoke %>%
+  select(PREG_ID, SMOKING) %>%
+  group_by(PREG_ID) %>%
+  slice_max(SMOKING)    #NB "NA" values removed (no problem as joining on to spine will replace any)
+
+nimats_preg_level_smoke <- nimats_preg_level_smoke %>%
+  mutate(CIGARETTES_SMOKED_PER_DAY = as.numeric(substr(CIGARETTES_SMOKED_PER_DAY, 1, 2)))
+
+nimats_preg_level_smoke_2 <- nimats_preg_level_smoke %>%
+  select(PREG_ID, CIGARETTES_SMOKED_PER_DAY) %>%
+  group_by(PREG_ID) %>%
+  slice_max(CIGARETTES_SMOKED_PER_DAY)
+ 
+```
+
+
+```{r}
+nimats_preg_level_smoke_1 <- nimats_preg_level_smoke_1 %>% distinct()
+nimats_preg_level_smoke_2 <- nimats_preg_level_smoke_2 %>% distinct()
+```
+
+
+```{r}
+curr_smoke_summary <- nimats_preg_level_smoke %>%
+  select(PREG_ID, CURRENTLY_SMOKING) %>%
+  group_by(PREG_ID, CURRENTLY_SMOKING) %>%
+  summarise(COUNT = n())
+```
+
+```{r}
+curr_smoke_summary$COUNT[curr_smoke_summary$COUNT>0] <- 1
+```
+
+```{r}
+curr_smoke_wide <- curr_smoke_summary %>%
+  pivot_wider(names_from = CURRENTLY_SMOKING,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(curr_smoke_wide)[2:ncol(curr_smoke_wide)] <- paste0("CURRENTLY_SMOKING_", colnames(curr_smoke_wide)[2:ncol(curr_smoke_wide)])
+head(curr_smoke_wide)
+```
+
+
+```{r}
+# how many have discordant values for currently smoking?  - LOTS!!!
+curr_smoke_wide %>% group_by(CURRENTLY_SMOKING_1, CURRENTLY_SMOKING_2) %>% count()
+
+curr_smoke_wide %>% group_by(CURRENTLY_SMOKING_1, CURRENTLY_SMOKING_3) %>% count()
+
+curr_smoke_wide %>% group_by(CURRENTLY_SMOKING_1, CURRENTLY_SMOKING_4) %>% count()
+```
+
+
+```{r}
+#reminder of metadata:
+#01 = Never smoked
+#02 = No, stopped smoking this pregnancy
+#03 = No, stopped smoking prior to this pregnancy
+#04 = Yes
+
+# Would like to keep "worst case scenario" for each pregnancy
+# Therefore, need to over-write according to the following hierarchy
+# CURRENTLY_SMOKING_4, CURRENTLY_SMOKING_2, CURRENTLY_SMOKING_3, CURRENTLY_SMOKING_1, CURRENTLY_SMOKING_NA
+
+curr_smoke_wide <- curr_smoke_wide %>%
+  mutate(CURRENT_SMOKE_YES = CURRENTLY_SMOKING_4,
+         CURRENT_SMOKE_STOP_THIS = if_else(CURRENTLY_SMOKING_2 == 1 & CURRENTLY_SMOKING_4 == 0, 1, 0),
+         CURRENT_SMOKE_STOP_PRIOR = if_else(CURRENTLY_SMOKING_3 == 1 & CURRENTLY_SMOKING_2 == 0 & CURRENTLY_SMOKING_4 == 0, 1, 0),
+         CURRENT_SMOKE_NEVER = if_else(CURRENTLY_SMOKING_1 == 1 & CURRENTLY_SMOKING_2 == 0 & CURRENTLY_SMOKING_3 == 0 & CURRENTLY_SMOKING_4 == 0, 1, 0),
+         CURRENT_SMOKE_NA = if_else(CURRENTLY_SMOKING_NA == 1 & CURRENTLY_SMOKING_1 == 0 & CURRENTLY_SMOKING_2 == 0 & CURRENTLY_SMOKING_3 == 0 & CURRENTLY_SMOKING_4 == 0, 1, 0),
+         )
+
+head(curr_smoke_wide, 50)
+```
+
+#01 = Never smoked
+#02 = No, stopped smoking this pregnancy
+#03 = No, stopped smoking prior to this pregnancy
+#04 = Yes
+##
+
+
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_smoke_1, by="PREG_ID")
+```
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_smoke_2, by="PREG_ID")
+```
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, curr_smoke_wide, by="PREG_ID")
+```
+
+```{r}
+#smoking variables changed across duration of study
+# "CURRENTLY SMOKING" VARIABLES ONLY USEFUL FROM 2017 ONWARDS
+#mumpredict values of "smoker", "non-smoker" and "ex-smoker" ascertained from across various smoking variables
+
+nimats_preg_level %>% group_by(DOB_YEAR, CURRENT_SMOKE_YES, CURRENT_SMOKE_STOP_THIS, CURRENT_SMOKE_STOP_PRIOR, CURRENT_SMOKE_NEVER, CURRENT_SMOKE_NA) %>% count()
+
+nimats_preg_level %>% group_by(DOB_YEAR, SMOKING, CIGARETTES_SMOKED_PER_DAY) %>% count()
+
+
+nimats_preg_level <- nimats_preg_level %>%
+  mutate(SMOKING_STATUS = case_when(
+    CURRENT_SMOKE_YES == 1 | SMOKING > 0 | CIGARETTES_SMOKED_PER_DAY > 0 ~ "smoker",
+    CURRENT_SMOKE_STOP_THIS == 1 | CURRENT_SMOKE_STOP_PRIOR == 1 ~ "ex-smoker",
+    CURRENT_SMOKE_NEVER == 1 ~ "non-smoker"
+
+  )
+  )
+
+nimats_preg_level %>% group_by(DOB_YEAR, SMOKING_STATUS, CURRENT_SMOKE_YES, SMOKING>0, CIGARETTES_SMOKED_PER_DAY>0) %>% count()
+
+nimats_preg_level %>% group_by(DOB_YEAR, SMOKING_STATUS=="smoker") %>% count()
+```
+
+
+```{r}
+head(nimats_preg_level, 100)
+```
+
+
+
+__AGE AT BIRTH__
+```{r}
+nimats_preg_level_age <- nimats_gen %>%
+  select(PREG_ID, AGE_AT_BIRTH) %>%
+  distinct()
+
+```
+
+
+
+```{r}
+n_occur <- data.frame(table(nimats_preg_level_age$PREG_ID))
+duplicates <- nimats_preg_level_age[nimats_preg_level_age$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - not same PREG_ID causing the additional row as in SMOKING variable
+# solution = keep max value
+```
+
+```{r}
+nimats_preg_level_age <- nimats_preg_level_age %>%
+  group_by(PREG_ID) %>%
+  slice_max(AGE_AT_BIRTH)
+```
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_age, by="PREG_ID")
+```
+
+
+__BMI AT BOOKING__
+
+```{r}
+nimats_preg_level_bmi <- nimats_gen %>%
+  select(PREG_ID, BMI_AT_BOOKING) %>%
+  distinct()
+
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_preg_level_bmi$PREG_ID))
+duplicates <- nimats_preg_level_bmi[nimats_preg_level_bmi$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+
+# duplicates have one row with value and one row with NA
+# solution = keep max value
+```
+
+```{r}
+nimats_preg_level_bmi <- nimats_preg_level_bmi %>%
+  group_by(PREG_ID) %>%
+  slice_max(BMI_AT_BOOKING)
+```
+
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_bmi, by="PREG_ID")
+```
+
+__BMI__
+```{r}
+# NOTE ANU'S CODE REMOVES BMI BELOW 14 AND ABOVE 70
+# HOWEVER.... this removes what looks to be valid BMI in some cases
+# AND.... we don't know if these folks are more likely to have health conditions
+nimats_preg_level %>% filter(BMI_AT_BOOKING <14) %>% select(PREG_ID, AGE_AT_BIRTH, BMI_AT_BOOKING)
+nimats_preg_level %>% filter(BMI_AT_BOOKING >70) %>% select(PREG_ID, AGE_AT_BIRTH, BMI_AT_BOOKING)
+```
+
+```{r}
+nimats_preg_level <- nimats_preg_level %>%
+  mutate(
+    BMI_AT_BOOKING = as.numeric(BMI_AT_BOOKING),
+    # REMOVES BMI BELOW 14 AND ABOVE 70
+    BMI_CAT_14TO70 = case_when(
+      between(BMI_AT_BOOKING, 14, 18.4999) ~ "<18.5kg/m2",
+      between(BMI_AT_BOOKING, 18, 24.9999) ~ "18.5-25kg/m2",
+      between(BMI_AT_BOOKING, 25, 29.9999) ~ "25-30kg/m2",
+      between(BMI_AT_BOOKING, 30, 34.9999) ~ "30-35kg/m2",
+      between(BMI_AT_BOOKING, 35, 39.9999) ~ "35-40kg/m2",
+      between(BMI_AT_BOOKING, 40, 70) ~ ">40kg/m2"
+    )
+  )
+```
+__ETHICITY__
+```{r}
+nimats_preg_level_ethnic <- nimats_gen %>%
+  select(PREG_ID, ETHNIC_GROUP_CODE, ETHNIC_GROUP_DESC) %>%
+  distinct()
+# No additional rows
+```
+
+```{r}
+nimats_preg_level_ethnic %>% group_by(ETHNIC_GROUP_CODE, ETHNIC_GROUP_DESC) %>% count()
+# values for code - NK, NW, W
+# no additional info from desc therefore remove before joining
+```
+
+```{r}
+nimats_preg_level_ethnic <- nimats_preg_level_ethnic %>%
+  select(PREG_ID, ETHNIC_GROUP_CODE)
+```
+
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_ethnic, by="PREG_ID")
+```
+
+
+__ALCOHOL__
+
+```{r}
+nimats_preg_level_alc <- nimats_gen %>%
+  select(PREG_ID, ALCOHOL) %>%
+  distinct()
+
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_preg_level_alc$PREG_ID))
+duplicates <- nimats_preg_level_alc[nimats_preg_level_alc$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+
+# duplicates have one row with value and one row with NA
+# solution = keep max value
+```
+
+```{r}
+nimats_preg_level_alc <- nimats_preg_level_alc %>%
+  group_by(PREG_ID) %>%
+  slice_max(ALCOHOL)
+```
+
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_alc, by="PREG_ID")
+```
+
+
+
+__DISCLOSURE__
+
+```{r}
+nimats_preg_level_disc <- nimats_gen %>%
+  select(PREG_ID, DISCLOSURE_CODE, DISCLOSURE_DESC) %>%
+  distinct()
+
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_preg_level_disc$PREG_ID))
+duplicates <- nimats_preg_level_disc[nimats_preg_level_disc$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - two issues
+# some duplicates have one value and one NA
+# some duplicates have more than one value
+```
+
+
+```{r}
+nimats_preg_level_disc %>% group_by(DISCLOSURE_CODE, DISCLOSURE_DESC) %>% count()
+
+#1	No disclosure	
+#2	Disclosure- Family receiving services		
+#3	Historical Disclosure- no action required: support and advice offered
+#4	Disclosure- Risk assessment and referral
+
+# no obvious hierarchy in values 
+# Is it possible that two values can exist in same pregnancy- if so can't use max value
+# solution = create dummy variables
+```
+
+```{r}
+nimats_preg_level_disc <- nimats_preg_level_disc %>%
+  select(PREG_ID, DISCLOSURE_CODE) %>%
+  mutate(DISCLOSURE = case_when(
+    DISCLOSURE_CODE == "1" ~ "NONE",
+    DISCLOSURE_CODE == "2" ~ "YES_RECEIVING_SERVICES",
+    DISCLOSURE_CODE == "3" ~ "HISTORICAL",
+    DISCLOSURE_CODE == "4" ~ "YES_RISK_AX_REFERRAL"
+  ))
+```
+
+
+```{r}
+nimats_preg_level_disc %>% group_by(DISCLOSURE) %>% count()
+```
+
+```{r}
+nimats_preg_level_disc_summary <- nimats_preg_level_disc %>%
+  select(PREG_ID, DISCLOSURE) %>%
+  group_by(PREG_ID, DISCLOSURE) %>%
+  summarise(COUNT = n())
+```
+
+```{r}
+nimats_preg_level_disc_summary$COUNT[nimats_preg_level_disc_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_preg_level_disc_wide <- nimats_preg_level_disc_summary %>%
+  pivot_wider(names_from = DISCLOSURE,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_preg_level_disc_wide)[2:ncol(nimats_preg_level_disc_wide)] <- paste0("DISCLOSURE_", colnames(nimats_preg_level_disc_wide)[2:ncol(nimats_preg_level_disc_wide)])
+head(nimats_preg_level_disc_wide)
+```
+
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_disc_wide, by="PREG_ID")
+```
+
+
+__ASSISTED CONCEPTION__
+
+```{r}
+nimats_preg_level_assist <- nimats_gen %>%
+  select(PREG_ID, ASSISTED_CONCEPTION_CODE, ASSISTED_CONCEPTION_DESC) %>%
+  distinct()
+
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_preg_level_assist$PREG_ID))
+duplicates <- nimats_preg_level_assist[nimats_preg_level_assist$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - 
+# duplicates have one row with value and one row with NA
+# solution = keep max value
+```
+
+```{r}
+nimats_preg_level_assist %>% group_by(ASSISTED_CONCEPTION_CODE, ASSISTED_CONCEPTION_DESC) %>% count()
+
+#0	NONE		
+#1	INVESTIGATIONS ONLY		
+#12	OVULATION INDUCTION	
+#13	EGG COLLECTION		
+#14	OTHER		
+#2	CLOMID	
+#3	IVF		
+#4	ICSI		
+#5	EGG DONATION		
+#6	SPERM DONATION
+#7	EMBRYO DONATION		
+#8	FROZEN EMBRYO REPLACEMENT		
+#NA	NA
+
+# no hierarchy in values as several can exist in same pregnancy- can't use max value
+# solution = create dummy variables
+```
+
+```{r}
+nimats_preg_level_assist$ASSISTED_CONCEPTION_DESC <- gsub(" ", "_", nimats_preg_level_assist$ASSISTED_CONCEPTION_DESC)
+ 
+nimats_preg_level_assist %>% group_by(ASSISTED_CONCEPTION_DESC) %>% count()
+
+```
+
+```{r}
+nimats_preg_level_assist_summary <- nimats_preg_level_assist %>%
+  select(PREG_ID, ASSISTED_CONCEPTION_DESC) %>%
+  group_by(PREG_ID, ASSISTED_CONCEPTION_DESC) %>%
+  summarise(COUNT = n())
+```
+
+```{r}
+nimats_preg_level_assist_summary$COUNT[nimats_preg_level_assist_summary$COUNT>0] <- 1
+```
+
+```{r}
+nimats_preg_level_assist_wide <- nimats_preg_level_assist_summary %>%
+  pivot_wider(names_from = ASSISTED_CONCEPTION_DESC,
+              values_from = COUNT,
+              values_fill = list(COUNT = 0))
+```
+
+```{r}
+colnames(nimats_preg_level_assist_wide)[2:ncol(nimats_preg_level_assist_wide)] <- paste0("ASSIST_CONCEPT_", colnames(nimats_preg_level_assist_wide)[2:ncol(nimats_preg_level_assist_wide)])
+head(nimats_preg_level_assist_wide)
+```
+
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_assist_wide, by="PREG_ID")
+```
+
+__GESTATION AT BOOKING__
+
+```{r}
+nimats_preg_level_gest_book <- nimats_gen %>%
+  select(PREG_ID, GEST_AT_BOOKING_WEEKS, GEST_AT_BOOKING_DAYS) %>%
+  distinct()
+
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_preg_level_gest_book$PREG_ID))
+duplicates <- nimats_preg_level_gest_book[nimats_preg_level_gest_book$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - some differ in days but not weeks - booking appointment perhaps conducted over more than one day
+# check for any that differ by large amount, check other variables to make sure it represents same pregnancy
+
+# solution = keep **min** value as first booking appointment
+```
+
+```{r}
+nimats_preg_level_gest_book1 <- nimats_preg_level_gest_book %>%
+  select(PREG_ID, GEST_AT_BOOKING_WEEKS) %>%
+  group_by(PREG_ID) %>%
+  slice_min(GEST_AT_BOOKING_WEEKS) %>% # keep **min** value as first appointment
+  distinct()
+
+
+nimats_preg_level_gest_book2 <- nimats_preg_level_gest_book %>%
+  select(PREG_ID, GEST_AT_BOOKING_DAYS) %>%
+  group_by(PREG_ID) %>%
+  slice_min(GEST_AT_BOOKING_DAYS) %>% # keep **min** value as first appointment
+  distinct()
+```
+
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_gest_book1, by="PREG_ID")
+
+```
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_gest_book2, by="PREG_ID")
+```
+
+
+
+
+__GESTATIONAL AGE AT DELIVERY__
+```{r}
+nimats_preg_level_gest_del <- nimats_gen %>%
+  select(PREG_ID, GEST_AT_DELIVERY_WEEKS, GEST_AT_DELIVERY_DAYS) %>%
+  distinct()
+
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_preg_level_gest_del$PREG_ID))
+duplicates <- nimats_preg_level_gest_del[nimats_preg_level_gest_del$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection
+# Check to see if differences are due to twins/triplets born across different days
+# OR..... due to re-calculation of EDC within the database?
+
+```
+
+```{r}
+preg_ids <- duplicates %>% pull(PREG_ID)
+
+nimats_gen %>%
+  filter(PREG_ID %in% preg_ids) %>%
+  select(PREG_ID, GEST_AT_DELIVERY_WEEKS, GEST_AT_DELIVERY_DAYS, SEX, BIRTH_NUMBER, BIRTHS_THIS_PREGNANCY, BIRTH_ORDER, INFANT_BIRTH_WEIGHT, APGAR_SCORE_1MIN, APGAR_SCORE_5MIN)
+
+# Visual inspection confirmed that number of days gestation differs in relation to separate infants within some higher order pregnancies
+
+#  Solution = keep minimum WEEKS and DAYS (First baby born)
+```
+
+
+
+
+```{r}
+nimats_preg_level_gest_del1 <- nimats_preg_level_gest_del %>%
+  select(PREG_ID, GEST_AT_DELIVERY_WEEKS) %>%
+  group_by(PREG_ID) %>%
+  slice_min(GEST_AT_DELIVERY_WEEKS) %>%  # keep **min** value as first baby born
+  distinct()
+
+nimats_preg_level_gest_del2 <- nimats_preg_level_gest_del %>%
+  select(PREG_ID, GEST_AT_DELIVERY_DAYS) %>%
+  group_by(PREG_ID) %>%
+  slice_min(GEST_AT_DELIVERY_DAYS) %>% # keep **min** value as first baby born
+  distinct()
+```
+
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_gest_del1, by="PREG_ID")
+
+```
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_gest_del2, by="PREG_ID")
+```
+
+
+__EDC VARIABLES__
+
+```{r}
+nimats_preg_level_edc <- nimats_gen %>%
+  select(PREG_ID, EDC, EDC_CONFIRMED_ULTRASOUND, ACTUAL_EDC) %>%
+  distinct()
+
+```
+
+```{r}
+n_occur <- data.frame(table(nimats_preg_level_edc$PREG_ID))
+duplicates <- nimats_preg_level_edc[nimats_preg_level_edc$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - EDC same for each duplicate - no problem with this variable
+# EDC_CONFIRMED_ULTRASOUND - some duplicates have (a) valid date/NA, (b) differing dates
+# ACTUAL EDC - some duplicates due to differing dates
+# max values for EDC_CONFIRMED_ULTRASOUND AND ACTUAL_EDC match EDC
+# SOLUTION = in absence of info on why pairs differs in value, keep max (this removes the NA duplicates)
+```
+
+
+
+```{r}
+nimats_preg_level_edc_1 <- nimats_preg_level_edc %>%
+  select(PREG_ID, EDC) %>%
+  distinct() # duplicated rows do not differ in this variable
+  
+
+nimats_preg_level_edc_2 <- nimats_preg_level_edc %>%
+  select(PREG_ID,EDC_CONFIRMED_ULTRASOUND) %>%
+  group_by(PREG_ID) %>%
+  slice_max(EDC_CONFIRMED_ULTRASOUND) %>%  # keep max value 
+  distinct()
+
+nimats_preg_level_edc_3 <- nimats_preg_level_edc %>%
+  select(PREG_ID,ACTUAL_EDC) %>%
+  group_by(PREG_ID) %>%
+  slice_max(ACTUAL_EDC) %>% # keep max value 
+  distinct()
+
+```
+
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_edc_1, by="PREG_ID")
+
+```
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_edc_2, by="PREG_ID")
+```
+
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_edc_3, by="PREG_ID")
+```
+
+
+
+
+__PARITY__
+
+```{r}
+nimats_preg_level_parity <- nimats_gen %>%
+  select(PREG_ID, PARITY) %>%
+  distinct()
+# No duplications
+```
+
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_parity, by="PREG_ID")
+```
+
+
+```{r}
+head(nimats_preg_level)
+```
+
+
+
+__PREVIOUS C SECTIONS__
+```{r}
+nimats_preg_level_csec <- nimats_gen %>%
+  select(PREG_ID, NUMBER_OF_C_SECTIONS) %>%
+  distinct()
+
+```
+
+
+```{r}
+n_occur <- data.frame(table(nimats_preg_level_csec$PREG_ID))
+duplicates <- nimats_preg_level_csec[nimats_preg_level_csec$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# some duplicates have (a) valid date/NA, (b) differing dates
+
+# SOLUTION = keep max (this also removes the NA duplicates)
+```
+
+```{r}
+nimats_preg_level_csec <- nimats_preg_level_csec %>%
+  select(PREG_ID,NUMBER_OF_C_SECTIONS) %>%
+  group_by(PREG_ID) %>%
+  slice_max(NUMBER_OF_C_SECTIONS)  # keep max value 
+```
+
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_csec, by="PREG_ID")
+```
+
+
+__GEOGRAPHY VARIABLES__
+```{r}
+nimats_preg_level_geog <- nimats_gen %>%
+  select(PREG_ID, Settlement_Band_2015, MDM_Decile_2017, anon_soa) %>%
+  distinct()
+# 1 additional row
+```
+
+
+```{r}
+n_occur <- data.frame(table(nimats_preg_level_geog$PREG_ID))
+duplicates <- nimats_preg_level_geog[nimats_preg_level_geog$PREG_ID %in% n_occur$Var1[n_occur$Freq>1],]
+duplicates[order(duplicates$PREG_ID),]
+# visual inspection - different values creating duplicates
+
+# SOLUTION = replace with NA (as no info on which is correct)
+```
+
+```{r}
+#identify which PREG_IDs associated with duplicates, replace geography variables with NA, then de-duplicate
+nimats_preg_level_geog$MDM_Decile_2017[nimats_preg_level_geog$PREG_ID %in% duplicates$PREG_ID] <- NA
+nimats_preg_level_geog$anon_soa[nimats_preg_level_geog$PREG_ID %in% duplicates$PREG_ID] <- NA
+nimats_preg_level_geog$Settlement_Band_2015[nimats_preg_level_geog$PREG_ID %in% duplicates$PREG_ID] <- NA
+nimats_preg_level_geog <- nimats_preg_level_geog %>%
+  distinct()
+```
+
+
+
+
+```{r}
+# explore dependencies between SOA, settlement band and MDM decile
+nimats_preg_level_geog_summary <- nimats_preg_level_geog %>% group_by(anon_soa, Settlement_Band_2015, MDM_Decile_2017) %>% count()
+
+```
+
+
+
+
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_geog, by="PREG_ID")
+```
+
+
+```{r}
+nimats_preg_level <- nimats_preg_level %>%
+  mutate(
+    DEPRIVATION_QUNTILE = case_when(
+      MDM_Decile_2017 == 1 | MDM_Decile_2017 == 2 ~ 1,
+      MDM_Decile_2017 == 3 | MDM_Decile_2017 == 4 ~ 2,
+      MDM_Decile_2017 == 5 | MDM_Decile_2017 == 6 ~ 3,
+      MDM_Decile_2017 == 7 | MDM_Decile_2017 == 8 ~ 4,
+      MDM_Decile_2017 == 9 | MDM_Decile_2017 == 10 ~ 5
+    )
+  )
+```
+
+```{r}
+head(nimats_preg_level)
+```
+
+
+__REGISTRATION STATUS__
+
+```{r}
+nimats_preg_level_reg <- nimats_gen %>%
+  select(PREG_ID, reg_status) %>%
+  distinct()
+# no duplicates
+```
+
+
+```{r}
+nimats_preg_level <- left_join(nimats_preg_level, nimats_preg_level_reg, by="PREG_ID")
+
+```
+
+
+
+
+
+__WRITE TO CSV__
+
+```{r}
+write_csv(nimats_preg_level, file=paste0("S:/HBS_E062/3. DATA/nimats_preg_level_", format(lubridate::now(), "%Y.%m.%d_%H.%M"), ".csv"))
+```
+
+
+
+
+######################################
+#######           END          #######
+######################################
